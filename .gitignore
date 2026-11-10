@@ -26,3 +26,5 @@ rustc-ice-*.txt
 =======
 /target
 >>>>>>> d8753f1 (init: MoveKernel ARM project with virtio-gpu)
+
+kernel8.bin
