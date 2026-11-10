@@ -21,6 +21,11 @@ _start:
     str xzr, [x0], #8
     b 1b
 2:
+    // Install the EL1 exception vectors before enabling interrupts.
+    adr x0, exception_vectors
+    msr vbar_el1, x0
+    isb
+
     // Jump to Rust
     bl kernel_main
 

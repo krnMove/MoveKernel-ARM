@@ -2,11 +2,41 @@
 
 Портирование MoveKernel на архитектуру AArch64 (ARM64).
 
-- Загрузка в QEMU `virt` (Cortex-A72)
+- Загрузка в QEMU `virt` (Cortex-A57)
 - Свой загрузчик (`boot.s`) и линкер-скрипт
 - Драйвер virtio-gpu и вывод текста на framebuffer
+- GICv3 и прерывания ARM Generic Timer
+- Virtio-blk и чтение FAT32 (каталог корня, имена 8.3)
 - Свой шрифт 5x7
 
-(пока через cargo objcopy и QEMU, позже добавим скрипты)
+## Запуск в QEMU
+
+Соберите ядро и тестовый FAT32-образ с файлом `HELLO.TXT`:
+
+```powershell
+cargo build --target aarch64-unknown-none --release
+powershell -ExecutionPolicy Bypass -File tools\create-fat32-image.ps1
+```
+
+Запустите QEMU с GICv3, графическим адаптером и virtio-диском:
+
+```powershell
+qemu-system-aarch64 `
+  -machine virt,gic-version=3 `
+  -cpu cortex-a57 `
+  -m 128M `
+  -kernel target\aarch64-unknown-none\release\movekernel-arm `
+  -device virtio-gpu-device `
+  -drive if=none,id=disk0,file=target\fat32.img,format=raw `
+  -device virtio-blk-device,drive=disk0 `
+  -global virtio-mmio.force-legacy=false `
+  -display sdl `
+  -serial none
+```
+
+Консоль показывает тики таймера, содержимое корневого каталога и текст из
+`HELLO.TXT`. Драйвер FAT32 работает только на чтение; для имён файлов сейчас
+поддерживается формат 8.3. Если диск не подключён или образ не распознан,
+ошибка выводится на экран, а консоль продолжает работать.
 
 - Основной x86-репозиторий: [MoveKernel](https://github.com/krnMove/MoveKernel)
