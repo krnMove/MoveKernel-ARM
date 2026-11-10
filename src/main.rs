@@ -8,6 +8,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 mod console;
 mod fat32;
 mod gic;
+mod heap;
+mod mmu;
 mod virtio_blk;
 mod virtio_gpu;
 
@@ -16,6 +18,13 @@ global_asm!(include_str!("vectors.s"));
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main() -> ! {
+    if let Err(error) = mmu::init() {
+        panic!("ARM MMU initialization failed: {error}");
+    }
+    if let Err(error) = heap::init() {
+        panic!("heap initialization failed: {error}");
+    }
+
     if let Err(error) = console::init() {
         panic!("virtio-gpu initialization failed: {error}");
     }
@@ -23,6 +32,19 @@ pub extern "C" fn kernel_main() -> ! {
     if let Err(error) = gic::init() {
         panic!("GICv3 initialization failed: {error}");
     }
+
+    if !mmu::is_enabled() {
+        panic!("ARM MMU is not enabled");
+    }
+    if !heap::self_test() {
+        panic!("heap allocation/alignment/reuse self-test failed");
+    }
+    println!("ARM MMU identity map enabled").unwrap_or_else(|_| panic!("virtio-gpu output failed"));
+    println!(
+        "Heap ready: {} KiB; allocator self-test passed",
+        heap::capacity_bytes() / 1024
+    )
+    .unwrap_or_else(|_| panic!("virtio-gpu output failed"));
 
     match fat32::Fat32::mount() {
         Ok(volume) => {
