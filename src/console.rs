@@ -8,8 +8,8 @@ const MAX_WIDTH: usize = 1280;
 const MAX_HEIGHT: usize = 800;
 const CELL_WIDTH: usize = 6;
 const CELL_HEIGHT: usize = 8;
-const BACKGROUND: u32 = 0xff10_1820;
-const FOREGROUND: u32 = 0xffd0_d8e0;
+const BACKGROUND: u32 = 0xff00_0000;
+const FOREGROUND: u32 = 0xffff_ffff;
 
 #[repr(align(4096))]
 struct Framebuffer([u32; MAX_WIDTH * MAX_HEIGHT]);
@@ -78,6 +78,165 @@ pub fn is_initialized() -> bool {
 
 pub fn print(arguments: fmt::Arguments<'_>) -> fmt::Result {
     ConsoleWriter.write_fmt(arguments)
+}
+
+pub fn print_startup_line(arguments: fmt::Arguments<'_>) -> fmt::Result {
+    print(arguments)?;
+
+    let frequency: u64;
+    let start: u64;
+    unsafe {
+        core::arch::asm!(
+            "mrs {frequency}, cntfrq_el0",
+            "mrs {start}, cntpct_el0",
+            frequency = out(reg) frequency,
+            start = out(reg) start,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    if frequency != 0 {
+        let delay = frequency / 40;
+        loop {
+            let current: u64;
+            unsafe {
+                core::arch::asm!(
+                    "mrs {current}, cntpct_el0",
+                    current = out(reg) current,
+                    options(nomem, nostack, preserves_flags)
+                );
+            }
+            if current.wrapping_sub(start) >= delay {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    Ok(())
+}
+
+pub fn clear() -> fmt::Result {
+    if !is_initialized() {
+        return Err(fmt::Error);
+    }
+    unsafe {
+        CURSOR_X = 8;
+        CURSOR_Y = 8;
+        fill_background();
+        virtio_gpu::flush(WIDTH, HEIGHT).map_err(|_| fmt::Error)
+    }
+}
+
+pub fn draw_startup(
+    version: &str,
+    heap_kib: usize,
+    disk_sectors: Option<u32>,
+    filesystem_error: Option<&dyn fmt::Display>,
+) -> fmt::Result {
+    clear()?;
+
+    let rows = unsafe { HEIGHT / CELL_HEIGHT };
+    let separator_row = rows / 5;
+    let status_row = rows / 4;
+    draw_logo()?;
+
+    let columns = unsafe { WIDTH / CELL_WIDTH };
+    let separator = [b'-'; MAX_WIDTH / CELL_WIDTH];
+    let separator = core::str::from_utf8(&separator[..columns]).map_err(|_| fmt::Error)?;
+    set_cursor(0, separator_row);
+    ConsoleWriter.write_str(separator)?;
+
+    set_cursor(0, status_row);
+    print_startup_line(format_args!("MoveKernel ver {version}\n"))?;
+    print_startup_line(format_args!("ARM MMU identity map enabled\n"))?;
+    print_startup_line(format_args!("Heap ready: {heap_kib} KiB\n"))?;
+    if let Some(sectors) = disk_sectors {
+        print_startup_line(format_args!("Disk filesystem mounted: {sectors} sectors\n"))?;
+    } else {
+        print_startup_line(format_args!("Disk filesystem unavailable\n"))?;
+        if let Some(error) = filesystem_error {
+            print_startup_line(format_args!("Filesystem error: {error}\n"))?;
+        }
+    }
+
+    set_cursor(0, status_row + 4 + usize::from(filesystem_error.is_some()));
+    Ok(())
+}
+
+pub fn backspace() -> fmt::Result {
+    if !is_initialized() {
+        return Err(fmt::Error);
+    }
+    unsafe {
+        if CURSOR_X > 8 {
+            CURSOR_X -= CELL_WIDTH;
+            let buffer = addr_of_mut!(FRAMEBUFFER.0) as *mut u32;
+            for row in 0..CELL_HEIGHT {
+                for column in 0..CELL_WIDTH {
+                    write_volatile(
+                        buffer.add((CURSOR_Y + row) * WIDTH + CURSOR_X + column),
+                        BACKGROUND,
+                    );
+                }
+            }
+        }
+        virtio_gpu::flush(WIDTH, HEIGHT).map_err(|_| fmt::Error)
+    }
+}
+
+fn draw_logo() -> fmt::Result {
+    const ART: [&str; 5] = [
+        "M   M  OOO    V   V  EEEEE",
+        "MM MM O   O   V   V  E    ",
+        "M M M O   O   V   V  EEEE ",
+        "M   M O   O    V V   E    ",
+        "M   M  OOO      V    EEEEE",
+    ];
+    const SCALE: usize = 2;
+
+    let width = unsafe { WIDTH };
+    let height = unsafe { HEIGHT };
+    let art_width = ART[0]
+        .len()
+        .saturating_mul(CELL_WIDTH)
+        .saturating_mul(SCALE);
+    let origin_x = width.saturating_sub(art_width) / 2;
+    let origin_y = 16;
+    let buffer = unsafe { addr_of_mut!(FRAMEBUFFER.0) as *mut u32 };
+
+    for (art_row, line) in ART.iter().enumerate() {
+        for (character_index, character) in line.chars().enumerate() {
+            let glyph = glyph(character);
+            let character_x = origin_x + character_index * CELL_WIDTH * SCALE;
+            for (row, bits) in glyph.iter().enumerate() {
+                for column in 0..5 {
+                    if bits & (1 << (4 - column)) != 0 {
+                        for dy in 0..SCALE {
+                            for dx in 0..SCALE {
+                                let x = character_x + column * SCALE + dx;
+                                let y = origin_y + (art_row * CELL_HEIGHT + row) * SCALE + dy;
+                                if x < width && y < height {
+                                    unsafe {
+                                        write_volatile(buffer.add(y * width + x), FOREGROUND);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn set_cursor(column: usize, row: usize) {
+    unsafe {
+        CURSOR_X = column.saturating_mul(CELL_WIDTH);
+        CURSOR_Y = row.saturating_mul(CELL_HEIGHT);
+    }
 }
 
 struct ConsoleWriter;
@@ -181,6 +340,9 @@ fn glyph(character: char) -> [u8; 7] {
             '!' => [4, 4, 4, 4, 4, 0, 4],
             '?' => [14, 17, 1, 2, 4, 0, 4],
             '=' => [0, 31, 0, 31, 0, 0, 0],
+            '<' => [4, 8, 16, 8, 4, 0, 0],
+            '>' => [16, 8, 4, 8, 16, 0, 0],
+            '\'' => [4, 4, 8, 0, 0, 0, 0],
             '(' => [2, 4, 8, 8, 8, 4, 2],
             ')' => [8, 4, 2, 2, 2, 4, 8],
             '/' => [1, 2, 2, 4, 8, 8, 16],

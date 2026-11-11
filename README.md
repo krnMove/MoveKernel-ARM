@@ -2,47 +2,53 @@
 
 Портирование MoveKernel на архитектуру AArch64 (ARM64).
 
+- Полный список изменений: [CHANGELOG.md](CHANGELOG.md)
 - Загрузка в QEMU `virt` (Cortex-A57)
 - Свой загрузчик (`boot.s`) и линкер-скрипт
 - Драйвер virtio-gpu и вывод текста на framebuffer
-- GICv3 и прерывания ARM Generic Timer
+- GICv3 (Generic Timer отключён)
+- Кооперативный планировщик задач без таймерных прерываний
+- Ввод с virtio-клавиатуры и интерактивная консоль
 - ARM MMU: identity-map для RAM, GIC и virtio MMIO
 - 1 MiB heap с выравниванием, освобождением и повторным использованием блоков
-- Virtio-blk и чтение FAT32 (каталог корня, имена 8.3)
+- Virtio-blk и чтение/запись FAT32 (каталог корня, имена 8.3)
 - Свой шрифт 5x7
 
 ## Запуск в QEMU
 
-Соберите ядро и тестовый FAT32-образ с файлом `HELLO.TXT`:
+Соберите ядро и тестовый FAT32-образ с файлом `HELLO.TXT` одной командой:
 
 ```powershell
-cargo build --target aarch64-unknown-none --release
-powershell -ExecutionPolicy Bypass -File tools\create-fat32-image.ps1 `
-  -OutputPath target\fat32-test.img
+powershell -ExecutionPolicy Bypass -File tools\build-arm.ps1
 ```
 
-Запустите QEMU с GICv3, графическим адаптером и virtio-диском:
+Запустите собранную систему в QEMU:
 
 ```powershell
-qemu-system-aarch64 `
-  -machine virt,gic-version=3 `
-  -cpu cortex-a57 `
-  -m 128M `
-  -kernel target\aarch64-unknown-none\release\movekernel-arm `
-  -device virtio-gpu-device `
-  -drive if=none,id=disk0,file=target\fat32-test.img,format=raw `
-  -device virtio-blk-device,drive=disk0 `
-  -global virtio-mmio.force-legacy=false `
-  -display sdl `
-  -serial none
+powershell -ExecutionPolicy Bypass -File tools\run-arm.ps1
+```
+
+По умолчанию образ создаётся в `target\fat32-test.img`. Скрипт образа
+использует безопасный режим создания и не перезаписывает существующий файл.
+Чтобы собрать образ в другом месте, укажите, например:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\build-arm.ps1 `
+  -ImagePath target\my-test.img
+powershell -ExecutionPolicy Bypass -File tools\run-arm.ps1 `
+  -ImagePath target\my-test.img
 ```
 
 При старте ядро включает MMU и проверяет, что allocator может выделять,
-выравнивать, освобождать и повторно использовать память. Консоль показывает
-результат проверки, тики таймера, содержимое корневого каталога и текст из
-`HELLO.TXT`. Драйвер FAT32 работает только на чтение; для имён файлов сейчас
-поддерживается формат 8.3. Если диск не подключён или образ не распознан,
-ошибка выводится на экран, а консоль продолжает работать.
+выравнивать, освобождать и повторно использовать память. Планировщик запускает
+две кооперативные фоновые задачи; периодический Generic Timer отключён.
+Кликните по окну QEMU и вводите команды в консоль: `/HELP`, `/TASKS`, `/LS`,
+`/CAT HELLO.TXT`, `/WRITE NOTE.TXT текст`, `/CLEAR`. Список файлов показывает
+корень `MOVEKERNEL/` и записи корневого каталога. `/WRITE` создаёт или
+перезаписывает файл в корневом каталоге FAT32; имена поддерживаются в формате
+8.3. Запись текста ограничена длиной команды оболочки. Если диск не подключён
+или образ не распознан, сообщение об ошибке появится при запуске, а остальные
+команды останутся доступны.
 
 Минимальные проверки перед запуском:
 

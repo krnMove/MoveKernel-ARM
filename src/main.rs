@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use core::arch::global_asm;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -10,11 +12,15 @@ mod fat32;
 mod gic;
 mod heap;
 mod mmu;
+mod scheduler;
+mod shell;
 mod virtio_blk;
 mod virtio_gpu;
+mod virtio_keyboard;
 
 global_asm!(include_str!("boot.s"));
 global_asm!(include_str!("vectors.s"));
+global_asm!(include_str!("context.s"));
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main() -> ! {
@@ -39,70 +45,26 @@ pub extern "C" fn kernel_main() -> ! {
     if !heap::self_test() {
         panic!("heap allocation/alignment/reuse self-test failed");
     }
-    println!("ARM MMU identity map enabled").unwrap_or_else(|_| panic!("virtio-gpu output failed"));
-    println!(
-        "Heap ready: {} KiB; allocator self-test passed",
-        heap::capacity_bytes() / 1024
+    let (volume, disk_sectors, filesystem_error) = match fat32::Fat32::mount() {
+        Ok(volume) => (Some(volume), Some(volume.total_sectors()), None),
+        Err(error) => (None, None, Some(error)),
+    };
+
+    scheduler::init().unwrap_or_else(|error| panic!("scheduler initialization failed: {error}"));
+    virtio_keyboard::init()
+        .unwrap_or_else(|error| panic!("virtio keyboard initialization failed: {error}"));
+
+    console::draw_startup(
+        env!("CARGO_PKG_VERSION"),
+        heap::capacity_bytes() / 1024,
+        disk_sectors,
+        filesystem_error
+            .as_ref()
+            .map(|error| error as &dyn core::fmt::Display),
     )
     .unwrap_or_else(|_| panic!("virtio-gpu output failed"));
 
-    match fat32::Fat32::mount() {
-        Ok(volume) => {
-            println!("FAT32 mounted: {} sectors", volume.total_sectors())
-                .unwrap_or_else(|_| panic!("virtio-gpu output failed"));
-            volume
-                .list_root(|entry| {
-                    println!(
-                        "{}{} {} bytes",
-                        if entry.is_directory() { "DIR " } else { "FILE" },
-                        entry.name(),
-                        entry.size()
-                    )
-                    .unwrap_or_else(|_| panic!("virtio-gpu output failed"));
-                    true
-                })
-                .unwrap_or_else(|error| panic!("FAT32 root directory read failed: {error}"));
-
-            let mut file_contents = [0; 128];
-            match volume.read_file_83("HELLO.TXT", &mut file_contents) {
-                Ok(length) => {
-                    println!("HELLO.TXT:").unwrap_or_else(|_| panic!("virtio-gpu output failed"));
-                    match core::str::from_utf8(&file_contents[..length]) {
-                        Ok(contents) => println!("{}", contents)
-                            .unwrap_or_else(|_| panic!("virtio-gpu output failed")),
-                        Err(_) => println!("(file is not UTF-8 text)")
-                            .unwrap_or_else(|_| panic!("virtio-gpu output failed")),
-                    }
-                }
-                Err(fat32::Error::NotFound) => {
-                    println!("HELLO.TXT not present")
-                        .unwrap_or_else(|_| panic!("virtio-gpu output failed"));
-                }
-                Err(error) => panic!("HELLO.TXT read failed: {error}"),
-            }
-        }
-        Err(error) => println!("Filesystem unavailable: {}", error)
-            .unwrap_or_else(|_| panic!("virtio-gpu output failed")),
-    }
-
-    println!("MoveKernel ARM").unwrap_or_else(|_| panic!("virtio-gpu output failed"));
-    println!("GICv3 initialized; generic timer IRQ enabled")
-        .unwrap_or_else(|_| panic!("virtio-gpu output failed"));
-    println!("virtio-gpu console ready").unwrap_or_else(|_| panic!("virtio-gpu output failed"));
-
-    let mut last_tick = gic::ticks();
-
-    loop {
-        unsafe {
-            core::arch::asm!("wfe", options(nomem, nostack, preserves_flags));
-        }
-        let current_tick = gic::ticks();
-        if current_tick != last_tick {
-            last_tick = current_tick;
-            println!("Timer ticks: {}", current_tick)
-                .unwrap_or_else(|_| panic!("virtio-gpu output failed"));
-        }
-    }
+    shell::run(volume)
 }
 
 static PANICKING: AtomicBool = AtomicBool::new(false);

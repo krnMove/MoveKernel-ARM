@@ -1,26 +1,15 @@
 use core::arch::asm;
 use core::fmt;
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicU64, Ordering};
 
 const GICD_BASE: usize = 0x0800_0000;
 const GICR_BASE: usize = 0x080a_0000;
 const GICR_WAKER: usize = 0x0014;
-const GICR_SGI_BASE: usize = 0x1_0000;
-const GICR_IGROUPR0: usize = GICR_SGI_BASE + 0x0080;
-const GICR_ISENABLER0: usize = GICR_SGI_BASE + 0x0100;
-const GICR_IPRIORITYR: usize = GICR_SGI_BASE + 0x0400;
-const IRQ_TIMER_PHYSICAL: u32 = 30;
-const MAX_TIMER_INTERVAL: u64 = i32::MAX as u64;
-
-static TICKS: AtomicU64 = AtomicU64::new(0);
-static mut TIMER_INTERVAL: u32 = 0;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Error {
     RedistributorUnavailable,
     SystemRegisterInterfaceUnavailable,
-    InvalidTimerFrequency,
 }
 
 impl fmt::Display for Error {
@@ -29,9 +18,6 @@ impl fmt::Display for Error {
             Self::RedistributorUnavailable => formatter.write_str("GIC redistributor did not wake"),
             Self::SystemRegisterInterfaceUnavailable => {
                 formatter.write_str("GICv3 system register interface unavailable")
-            }
-            Self::InvalidTimerFrequency => {
-                formatter.write_str("invalid ARM generic timer frequency")
             }
         }
     }
@@ -47,6 +33,12 @@ fn write32(address: usize, value: u32) {
 
 pub fn init() -> Result<(), Error> {
     unsafe {
+        asm!(
+            "msr CNTP_CTL_EL0, xzr",
+            "isb",
+            options(nostack, preserves_flags)
+        );
+
         let waker = read32(GICR_BASE + GICR_WAKER);
         write32(GICR_BASE + GICR_WAKER, waker & !(1 << 1));
 
@@ -74,14 +66,6 @@ pub fn init() -> Result<(), Error> {
             return Err(Error::SystemRegisterInterfaceUnavailable);
         }
 
-        let group = read32(GICR_BASE + GICR_IGROUPR0) | (1 << IRQ_TIMER_PHYSICAL);
-        write32(GICR_BASE + GICR_IGROUPR0, group);
-        write_volatile(
-            (GICR_BASE + GICR_IPRIORITYR + IRQ_TIMER_PHYSICAL as usize) as *mut u8,
-            0x80,
-        );
-        write32(GICR_BASE + GICR_ISENABLER0, 1 << IRQ_TIMER_PHYSICAL);
-
         let distributor_control = read32(GICD_BASE) | (1 << 1);
         write32(GICD_BASE, distributor_control);
 
@@ -95,39 +79,7 @@ pub fn init() -> Result<(), Error> {
             options(nostack, preserves_flags)
         );
     }
-
-    let frequency: u64;
-    unsafe {
-        asm!(
-            "mrs {frequency}, CNTFRQ_EL0",
-            frequency = out(reg) frequency,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
-    if frequency == 0 {
-        return Err(Error::InvalidTimerFrequency);
-    }
-
-    let interval = frequency.min(MAX_TIMER_INTERVAL) as u32;
-    unsafe {
-        TIMER_INTERVAL = interval;
-        asm!(
-            "msr CNTP_CTL_EL0, xzr",
-            "msr CNTP_TVAL_EL0, {interval}",
-            "msr CNTP_CTL_EL0, {enable}",
-            "isb",
-            interval = in(reg) interval as u64,
-            enable = in(reg) 1u64,
-            options(nostack, preserves_flags)
-        );
-        asm!("msr DAIFClr, #2", options(nostack, preserves_flags));
-    }
-
     Ok(())
-}
-
-pub fn ticks() -> u64 {
-    TICKS.load(Ordering::Relaxed)
 }
 
 #[unsafe(no_mangle)]
@@ -141,20 +93,7 @@ pub extern "C" fn gic_irq_handler() {
         );
     }
 
-    let interrupt_id = (acknowledge & 0x3ff) as u32;
-    if interrupt_id == IRQ_TIMER_PHYSICAL {
-        TICKS.fetch_add(1, Ordering::Relaxed);
-        let interval = unsafe { TIMER_INTERVAL };
-        unsafe {
-            asm!(
-                "msr CNTP_TVAL_EL0, {interval}",
-                interval = in(reg) interval as u64,
-                options(nostack, preserves_flags)
-            );
-        }
-    }
-
-    if interrupt_id < 1020 {
+    if acknowledge & 0x3ff < 1020 {
         unsafe {
             asm!(
                 "msr ICC_EOIR1_EL1, {value}",

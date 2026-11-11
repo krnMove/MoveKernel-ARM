@@ -41,7 +41,7 @@ try {
     $boot[16] = $fatCount
     [Array]::Copy([BitConverter]::GetBytes([uint32]$TotalSectors), 0, $boot, 32, 4)
     [Array]::Copy([BitConverter]::GetBytes([uint32]$sectorsPerFat), 0, $boot, 36, 4)
-    [Array]::Copy([BitConverter]::GetBytes([uint16]2), 0, $boot, 40, 2)
+    [Array]::Copy([BitConverter]::GetBytes([uint16]0), 0, $boot, 40, 2)
     [Array]::Copy([BitConverter]::GetBytes([uint16]1), 0, $boot, 42, 2)
     [Array]::Copy([BitConverter]::GetBytes([uint32]2), 0, $boot, 44, 4)
     [Array]::Copy([BitConverter]::GetBytes([uint16]1), 0, $boot, 48, 2)
@@ -71,7 +71,10 @@ try {
     $stream.Position = 7 * $bytesPerSector
     $stream.Write($fsInfo, 0, $fsInfo.Length)
 
-    foreach ($fatStart in @($reservedSectors, $reservedSectors + $sectorsPerFat)) {
+    $fatStarts = @()
+    $fatStarts += [uint32]$reservedSectors
+    $fatStarts += [uint32]($reservedSectors + $sectorsPerFat)
+    foreach ($fatStart in $fatStarts) {
         $fatSector = New-Object byte[] $bytesPerSector
         [Array]::Copy([BitConverter]::GetBytes([uint32]0x0ffffff8), 0, $fatSector, 0, 4)
         [Array]::Copy([BitConverter]::GetBytes([uint32]::MaxValue), 0, $fatSector, 4, 4)

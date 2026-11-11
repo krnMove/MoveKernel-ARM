@@ -35,6 +35,7 @@ const REG_CONFIG: usize = 0x100;
 
 const FEATURE_VERSION_1: u32 = 1;
 const REQUEST_IN: u32 = 0;
+const REQUEST_OUT: u32 = 1;
 const DESCRIPTOR_F_NEXT: u16 = 1;
 const DESCRIPTOR_F_WRITE: u16 = 2;
 
@@ -63,8 +64,8 @@ impl fmt::Display for Error {
             Self::InvalidCapacity => formatter.write_str("virtio-blk reported an empty disk"),
             Self::SectorOutOfRange => formatter.write_str("disk sector is out of range"),
             Self::RequestTimedOut => formatter.write_str("virtio-blk request timed out"),
-            Self::IoError => formatter.write_str("virtio-blk read failed"),
-            Self::UnsupportedRequest => formatter.write_str("virtio-blk rejected the read request"),
+            Self::IoError => formatter.write_str("virtio-blk I/O failed"),
+            Self::UnsupportedRequest => formatter.write_str("virtio-blk rejected the request"),
         }
     }
 }
@@ -245,6 +246,19 @@ pub fn capacity_sectors() -> u64 {
 }
 
 pub fn read_sector(sector: u64, output: &mut [u8; SECTOR_SIZE]) -> Result<(), Error> {
+    transfer_sector(sector, output, false)
+}
+
+pub fn write_sector(sector: u64, input: &[u8; SECTOR_SIZE]) -> Result<(), Error> {
+    let mut sector_data = *input;
+    transfer_sector(sector, &mut sector_data, true)
+}
+
+fn transfer_sector(
+    sector: u64,
+    data_buffer: &mut [u8; SECTOR_SIZE],
+    write: bool,
+) -> Result<(), Error> {
     let base = unsafe { DEVICE_BASE };
     if base == 0 {
         return Err(Error::DeviceNotFound);
@@ -268,11 +282,14 @@ pub fn read_sector(sector: u64, output: &mut [u8; SECTOR_SIZE]) -> Result<(), Er
         write_volatile(
             header,
             RequestHeader {
-                request_type: REQUEST_IN,
+                request_type: if write { REQUEST_OUT } else { REQUEST_IN },
                 reserved: 0,
                 sector,
             },
         );
+        if write {
+            core::ptr::copy_nonoverlapping(data_buffer.as_ptr(), data, SECTOR_SIZE);
+        }
         write_volatile(status, 0xff);
         write_volatile(
             descriptors,
@@ -288,7 +305,7 @@ pub fn read_sector(sector: u64, output: &mut [u8; SECTOR_SIZE]) -> Result<(), Er
             Descriptor {
                 address: data as u64,
                 length: SECTOR_SIZE as u32,
-                flags: DESCRIPTOR_F_NEXT | DESCRIPTOR_F_WRITE,
+                flags: DESCRIPTOR_F_NEXT | if write { 0 } else { DESCRIPTOR_F_WRITE },
                 next: 2,
             },
         );
@@ -330,7 +347,10 @@ pub fn read_sector(sector: u64, output: &mut [u8; SECTOR_SIZE]) -> Result<(), Er
         }
 
         match read_volatile(status) {
-            0 => core::ptr::copy_nonoverlapping(data, output.as_mut_ptr(), SECTOR_SIZE),
+            0 if !write => {
+                core::ptr::copy_nonoverlapping(data, data_buffer.as_mut_ptr(), SECTOR_SIZE)
+            }
+            0 => {}
             1 => return Err(Error::IoError),
             _ => return Err(Error::UnsupportedRequest),
         }
